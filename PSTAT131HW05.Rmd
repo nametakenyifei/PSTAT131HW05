@@ -7,10 +7,6 @@ toc_float: true
 code_folding: show
 ---
 
-```{r}
-
-```
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE,
                       warning = FALSE)
@@ -20,11 +16,13 @@ library(ggplot2)
 library(tidyverse)
 library(tidymodels)
 library(corrplot)
-library(discrim)
-library(corrr)
 library(klaR)
+library(glmnet)
 tidymodels_prefer()
 Pokemon <- read_csv("Pokemon.csv")
+pokemon <- readr::spec(Pokemon)
+pokemon
+library(janitor)
 ```
 
 
@@ -39,35 +37,71 @@ Pokemon <- read_csv("Pokemon.csv")
 Install and load the `janitor` package. Use its `clean_names()` function on the Pokémon data, and save the results to work with for the rest of the assignment. What happened to the data? Why do you think `clean_names()` is useful?
 
 ```{r }
-
-
+cleaned <- clean_names(Pokemon)
+cleaned
 ```
+As the function name suggests, it cleaned the names of our Pokemon data, made the names unique. I think clean_names() is useful, because sometime we may have variables with names that are very similar to each other, and have space as a part of the name, which can cause a lot of problems, and by using clean_names() we can avoid these problems, and we can change the letter case all at once. 
+
 
 ### Exercise 2
 
 Using the entire data set, create a bar chart of the outcome variable, `type_1`.
 
+```{r }
+count <- table(cleaned$type_1)
+count
+barplot(count, xlab = "types", ylab = "counts", main ="type 1 counts")
+# not all the type names are shown in the xlab because thats too long
+```
+
 How many classes of the outcome are there? Are there any Pokémon types with very few Pokémon? If so, which ones?
+    
+    There are 18 class of outcomes. There are Pokémon types with very few Pokémon. Such as the  Flying class which only has 4,  Fairy with 17. There are a few other classes that are barely having above 20 pokemons. 
 
 For this assignment, we'll handle the rarer classes by simply filtering them out. Filter the entire data set to contain only Pokémon whose `type_1` is Bug, Fire, Grass, Normal, Water, or Psychic.
+
+```{r }
+filtered <- cleaned %>% filter(
+  type_1 == "Bug" | type_1 == "Fire" | type_1 == "Grass" 
+  |type_1 == " Normal" | type_1 == "Water" | type_1 == "Psychic"
+  )
+filtered
+```
 
 After filtering, convert `type_1` and `legendary` to factors.
 
 ```{r }
-
-
+data <- filtered %>% 
+  mutate(type_1 = factor(type_1),
+         legendary = factor(legendary),
+         generation = factor(generation)
+         )
+data
 ```
 
 ### Exercise 3
 
 Perform an initial split of the data. Stratify by the outcome variable. You can choose a proportion to use. Verify that your training and test sets have the desired number of observations.
 
+```{r }
+pokemon_split <- data %>% 
+  initial_split(strata = type_1, prop = 0.7)
+pokemon_train <- training(pokemon_split)
+pokemon_test <- testing(pokemon_split)
+dim(pokemon_train)
+```
+    
+    There are 250 observations in our training set, which is roughly 70 percent of our filtered overall dataset.
+
 Next, use *v*-fold cross-validation on the training set. Use 5 folds. Stratify the folds by `type_1` as well. *Hint: Look for a `strata` argument.* Why might stratifying the folds be useful?
 
-```{r }
-
+```{r}
+pokemon_folds <- vfold_cv(pokemon_train, v = 5, strata = 'type_1')
+pokemon_folds
 
 ```
+  
+  Stratifying the folds can be useful useful because we want to make sure the cross validation reaches the result as realistic as possible. 
 
 ### Exercise 4
 
@@ -78,7 +112,11 @@ Set up a recipe to predict `type_1` with `legendary`, `generation`, `sp_atk`, `a
 - Center and scale all predictors.
 
 ```{r }
-
+pokemon_recipe <- recipe(type_1 ~ legendary + generation + sp_atk +
+                           attack + speed + defense + hp + sp_def,
+                         data = pokemon_train) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_predictors()) 
 
 ```
 
@@ -90,9 +128,22 @@ Set up this model and workflow. Create a regular grid for `penalty` and `mixture
 
 How many total models will you be fitting when you fit these models to your folded data?
 
+We will be fitting 500 models to our folded data.
+
 ```{r }
+elastic_spec <- 
+  multinom_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet")
 
+elastic_workflow <- workflow() %>% 
+  add_recipe(pokemon_recipe) %>% 
+  add_model(elastic_spec)
 
+penalty_grid <- grid_regular(penalty(range = c(-5, 5)), 
+                             mixture(range = c(0, 1)),
+                             levels = 10)
+penalty_grid
 ```
 
 ### Exercise 6
@@ -102,7 +153,14 @@ Fit the models to your folded data using `tune_grid()`.
 Use `autoplot()` on the results. What do you notice? Do larger or smaller values of `penalty` and `mixture` produce better accuracy and ROC AUC?
 
 ```{r }
-
+tune_res <- tune_grid(
+  elastic_workflow,
+  resamples = pokemon_folds, 
+  grid = penalty_grid
+)
+```
+```{r }
+autoplot(tune_res)
 
 ```
 
@@ -111,10 +169,20 @@ Use `autoplot()` on the results. What do you notice? Do larger or smaller values
 Use `select_best()` to choose the model that has the optimal `roc_auc`. Then use `finalize_workflow()`, `fit()`, and `augment()` to fit the model to the training set and evaluate its performance on the testing set.
 
 ```{r }
+collect_metrics(tune_res)
+best_penalty <- select_best(tune_res, metric = "roc_auc")
+best_penalty
+```
+```{r}
+elastic_final <- finalize_workflow(elastic_workflow, best_penalty)
+
+elastic_final_fit <- fit(elastic_final, data = pokemon_train)
 
 
 ```
-
+augment(elastic_final_fit, new_data = pokemon_test) %>%
+  rsq(truth = Salary, estimate = .pred)
+  
 ### Exercise 8
 
 Calculate the overall ROC AUC on the testing set.
